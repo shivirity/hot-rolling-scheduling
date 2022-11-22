@@ -1,6 +1,7 @@
 import math
 import random
 import copy
+import time
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -62,6 +63,9 @@ class Problem:
 
     def __init__(self, df, num_of_batch: int, iteration: int, population: int):
         # const of system
+        self.local_iter = 1000  # 局部搜索的间隔代数
+        # self.local_items = population
+        self.local_items = int(population/2)
         self.max_batch_len = 800000
         self.max_same_width_len = 200000
         self.max_cross_time = 5      # 产生子代时的最大交叉次数
@@ -102,7 +106,7 @@ class Problem:
         self.best_sol = None     # 种群最优解
         self.best_score = np.inf # 种群最优score
 
-        '''均分思想
+        # 均分思想
         init_slabs, init_sol_tmp = [_ for _ in range(self.num_of_slab)], []
         for i in range(self.m):
             init_sol_tmp += init_slabs[i:len(init_slabs):self.m]
@@ -110,8 +114,9 @@ class Problem:
                 init_sol_tmp.append(-1)
         self.init_sol = init_sol_tmp
         self.init_sol_score = self.get_fitness(self.init_sol)
+
         '''
-        '''贪婪（按照总长度）
+        # 贪婪（按照总长度）
         ind_list = []
         l_sum = 0
         for i in range(self.num_of_slab):
@@ -128,9 +133,9 @@ class Problem:
             init_sol_tmp.append(-1)
         init_sol_tmp.pop(-1)
         self.init_sol = init_sol_tmp
-        self.init_score = self.get_fitness(self.init_sol)
+        self.init_sol_score = self.get_fitness(self.init_sol)
         '''
-        #精细的贪婪
+        '''精细的贪婪
         init_batches = [[] for _ in range(self.m)]
         length_list, same_width_list = [0 for _ in range(self.m)], [[0, 0] for _ in range(self.m)]
         for i in range(self.num_of_slab):
@@ -157,7 +162,7 @@ class Problem:
         init_sol_tmp.pop(-1)
         self.init_sol = init_sol_tmp
         self.init_sol_score = self.get_fitness(self.init_sol)
-
+        '''
         assert self.init_sol.count(-1) == self.m - 1
         assert len(self.init_sol) == self.num_of_slab + self.m - 1
         assert len(set(self.init_sol)) == len(self.init_sol) - (self.m - 2)
@@ -167,6 +172,34 @@ class Problem:
         # test
         self.sols = [copy.deepcopy(self.init_sol) for _ in range(self.pop)]
         self.sols_scores = [self.init_sol_score for _ in range(self.pop)]
+
+        '''
+        # new_init_solutions
+        self.sols = None  # 用以储存自身的解种群
+        self.sols_scores = None  # 用以存储解种群的scores
+
+        init_slabs, init_sol_tmp = [_ for _ in range(self.num_of_slab)], []
+        for i in range(self.m):
+            init_sol_tmp += init_slabs[i:len(init_slabs):self.m]
+            if i < self.m-1:
+                init_sol_tmp.append(-1)
+        self.init_sol = init_sol_tmp
+        self.init_sol_score = self.get_fitness(self.init_sol)
+        self.sols, self.sols_scores = [list(self.init_sol)], [self.init_sol_score]
+        while True:
+            random.shuffle(init_slabs)
+            init_sol_tmp = []
+            for i in range(self.m):
+                init_sol_tmp += init_slabs[i:len(init_slabs):self.m]
+                if i < self.m - 1:
+                    init_sol_tmp.append(-1)
+            init_tmp_score = self.get_fitness(init_sol_tmp)
+            if init_tmp_score > 0:
+                self.sols.append(list(init_sol_tmp))
+                self.sols_scores.append(init_tmp_score)
+            if len(self.sols) == self.pop:
+                break
+        '''
 
     def get_c_mat(self) -> np.ndarray:
         """ 获得板材之间的成本矩阵 """
@@ -400,7 +433,7 @@ class Problem:
         """
         遗传算法主程序
 
-        :return:
+        :return: 最好个体，最好个体值
         """
         # 获得所有个体适应度
         c_sols, c_scores = copy.deepcopy(self.sols), copy.deepcopy(self.sols_scores)
@@ -411,8 +444,16 @@ class Problem:
         next_scores.append(c_scores[min_ind])
         # 其余需要变异产生子代
         for i in range(len(c_sols)):
-            if i == min_ind:
-                continue
+            if i == min_ind:  # 选到最优个体
+                for _ in range(self.max_cross_time):
+                    new_sol, new_fitness = self.get_new_sol(c_sols[i])
+                    if new_fitness < 0:
+                        continue
+                    allowance = True if math.log(self.temp/800, self.temp_dec_rate) > 0 else False
+                    if new_fitness < c_scores[i] or allowance:
+                        next_sols.append(new_sol)
+                        next_scores.append(new_fitness)
+                        break
             else:
                 flag = False
                 for _ in range(self.max_cross_time):
@@ -438,7 +479,112 @@ class Problem:
                     next_sols.append(c_sols[i])
                     next_scores.append(c_scores[i])
 
+        '''最优个体也加入变异过程，需要去除一个种群的最差值'''
+        assert len(next_sols) == self.pop or len(next_sols) == self.pop + 1
+        if len(next_sols) == self.pop + 1:  # 最优解成功插入，去除一个最差值
+            max_ind = next_scores.index(max(next_scores))
+            next_sols.pop(max_ind)
+            next_scores.pop(max_ind)
+
+        assert len(next_sols) == len(next_scores) and len(next_scores) == self.pop
         self.sols, self.sols_scores = next_sols, next_scores
+        next_min_ind = next_scores.index(min(next_scores))
+        return next_sols[next_min_ind], next_scores[next_min_ind]
+
+    def get_local_search(self, sol, score, swap_on):
+        """
+        获得局部搜索后的个体
+
+        :param sol: 需要局部搜索的个体
+        :param score: 需要局部搜索的个体得分
+        :param swap_on: 是否搜交换
+        :return: 局部搜索后的个体，局部搜索后的个体值
+        """
+        c_sol, c_score, flag = list(sol), score, True
+        # sep_ind_f, sep_ind_l = c_sol.index(-1), 102-c_sol[::-1].index(-1)
+        # 插板
+        while flag:
+            sep_inds = [ind for ind, item in enumerate(c_sol) if item == -1]
+            for i in range(1, sep_inds[-1]):
+                if i == sep_inds[1] or i == sep_inds[0]:
+                    pass
+                else:
+                    new_sol = list(c_sol)
+                    t_item = new_sol.pop(i)
+                    for j in range(i):
+                        test_sol = list(new_sol)
+                        test_sol.insert(j, t_item)
+                        test_score = self.get_fitness(test_sol)
+                        if c_score > test_score > 0:
+                            break
+                    else:
+                        continue
+                    assert len(set(test_sol)) == len(test_sol) - (self.m - 2)
+                    assert len(test_sol) == self.num_of_slab + self.m - 1
+                    c_sol = test_sol
+                    c_score = test_score
+                    break
+            else:
+                flag = False
+
+        if swap_on is True:
+            # 交换
+            flag = True
+            while flag:
+                sep_inds = [ind for ind, item in enumerate(c_sol) if item == -1]
+                for i in range(1, sep_inds[-1]):
+                    if i == sep_inds[1] or i == sep_inds[0]:
+                        pass
+                    else:
+                        new_sol = list(c_sol)
+                        for j in range(i):
+                            test_sol = list(new_sol)
+                            test_sol[i], test_sol[j] = test_sol[j], test_sol[i]
+                            test_score = self.get_fitness(test_sol)
+                            if c_score > test_score > 0:
+                                break
+                        else:
+                            continue
+                        assert len(set(test_sol)) == len(test_sol) - (self.m - 2)
+                        assert len(test_sol) == self.num_of_slab + self.m - 1
+                        c_sol = test_sol
+                        c_score = test_score
+                        break
+                else:
+                    flag = False
+
+        return c_sol, c_score
+
+    def local_search(self, swap_on):
+        """
+        局部搜索的主函数
+
+        :param swap_on: 是否搜交换
+        :return: 最好个体，最好个体的值
+        """
+        logger.info('Doing LocalSearch...')
+        # 获得所有个体适应度
+        c_sols, c_scores = copy.deepcopy(self.sols), copy.deepcopy(self.sols_scores)
+        min_c_score, avg_c_score = min(c_scores), sum(c_scores)/len(c_scores)
+        search_inds = random.sample([_ for _ in range(self.pop)], self.local_items)
+        next_sols, next_scores = [c_sols[i] for i in range(self.pop) if i not in search_inds], \
+                                 [c_scores[i] for i in range(self.pop) if i not in search_inds]
+        local_proc = 1
+        for search_ind in search_inds:
+            search_item, item_score = c_sols[search_ind], c_scores[search_ind]
+            search_sol, search_score = self.get_local_search(search_item, item_score, swap_on)
+            next_sols.append(search_sol)
+            next_scores.append(search_score)
+            logger.info(f'LocalSearching: {local_proc}/{self.local_items}')
+            local_proc += 1
+        assert len(next_sols) == len(next_scores) and len(next_scores) == self.pop
+        self.sols, self.sols_scores = next_sols, next_scores
+        min_next_score, avg_next_score = min(next_scores), sum(next_scores) / len(next_scores)
+        logger.info(f'c_scores: {c_scores}')
+        logger.info(f'next_scores: {self.sols_scores}')
+        logger.info(
+            'LocalSearch Done with min: {:.01f} -> {:.01f}, mean: {:.01f} -> {:.01f})'.format(
+                min_c_score, min_next_score, avg_c_score, avg_next_score))
         next_min_ind = next_scores.index(min(next_scores))
         return next_sols[next_min_ind], next_scores[next_min_ind]
 
@@ -447,8 +593,13 @@ class Problem:
         self.best_record, self.iter_x, self.iter_y = [], [], []
         for i in range(1, self.iteration + 1):
             tmp_best_one, tmp_best_score = self.ga()
+            if i % self.local_iter == 0 and i >= self.local_iter:
+                if i >= 8 * self.local_iter:
+                    tmp_best_one, tmp_best_score = self.local_search(swap_on=True)
+                else:
+                    tmp_best_one, tmp_best_score = self.local_search(swap_on=False)
             self.temp *= self.temp_dec_rate  # 降温
-
+            '''
             if i > 5000:
                 self.p_in_batch = 0.1
                 self.p_be_batch = 0
@@ -456,7 +607,7 @@ class Problem:
                 self.p_cross_batch = 0
                 self.forward_insert = 0.5
                 self.temp = 500
-
+            '''
             self.iter_x.append(i)
             self.iter_y.append(tmp_best_score)
             if tmp_best_score < best_score:
@@ -467,16 +618,6 @@ class Problem:
                 self.best_score = best_score
             # 打印每一次结果
             logger.info(f"epoch: {i}, score:{best_score}")
-            """
-            # 1w次不变后退出
-            if i >= 15000:
-                if (1. / best_score) == self.iter_y[i - 10000]:
-                    break
-                else:
-                    pass
-            else:
-                pass
-            """
         logger.warning(f'finished with best score: {best_score}')
         # return BEST_LIST, self.location[BEST_LIST], 1. / best_score
 
@@ -492,10 +633,20 @@ class Problem:
 
 
 if __name__ == '__main__':
+    time_start = time.time()
     data = read_in('data.csv')
-    problem = Problem(df=data, num_of_batch=4, iteration=7000, population=10)
+    problem = Problem(df=data, num_of_batch=4, iteration=5000, population=20)
     problem.run()
     problem.plot()
+    time_end = time.time()
+    time_sum = time_end - time_start
     sol_flag, batches = is_feasible_sol(problem.best_sol)
+    logger.warning("time span: {:.2f}s".format(time_sum))
     logger.warning(f'batches size: {[len(batch) for batch in batches]}')
     logger.warning(f'batches length: {[sum([i[2] for i in batch]) for batch in batches]}')
+
+    ordered_batches = []
+    for batch in batches:
+        ordered_batch = [problem.id[i[0]] for i in batch]
+        ordered_batches.append(ordered_batch)
+
